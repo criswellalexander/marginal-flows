@@ -10,6 +10,7 @@ import torch, h5py, random, corner, pickle
 from tqdm import tqdm
 import copy, os
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 
 def load_holodeck_population(popfile,N_gwb_bins,floor=1e-20):
@@ -143,7 +144,7 @@ def build_training_dataset(marginal_draws,holo_spectra,N_gwb_bins,Tspan,device,B
 
 def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_idx=None,
                              flow_filename='marginal_condflow.pkl',val_filename='val_chain.pkl',
-                             show=False):
+                             show=False,holo_args=None,comparison_holo_args=None):
     '''
     Function to load the trained flow, perform some postprocessing, and create plots/comparisons.
 
@@ -156,8 +157,17 @@ def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_
     flow_filename (str) : Name of the saved flow file. Default 'marginal_condflow.pkl'. Must be in [savedir].
     val_filename (str) : Name of the validation file. Default 'val_chain.pkl'. Must be in [savedir]
     show (bool)            : Whether to show plots. (Default False)
+    holo_args (dict) : (optional) Dictionary of arguments to be passed to load_holodeck_population. If not passed, no comparison to the full population will be made. (Default None.)
     
     '''
+
+    ## set font, formatting
+    plt.rcParams['font.family'] = 'STIXGeneral'  # Closely matches Computer Modern
+    plt.rcParams['mathtext.fontset'] = 'stix'    # Use STIX for math
+    plt.rcParams['font.size'] = 12
+    plt.rcParams['axes.labelsize'] = 20
+    plt.rcParams['legend.fontsize'] = 20
+    
     ## load the trained flow and auxiliaries
     gwb_flow_dist, info_dict, _, _ = torch.load(savedir+'/'+flow_filename,weights_only=False)
 
@@ -176,13 +186,13 @@ def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_
     half_range = info_dict['transform_info']['half_range']
     mean = info_dict['transform_info']['mean']
     B = info_dict['transform_info']['B']
-    inverse_transform =  half_range[-info_dict['input_dim']:]/B + mean[-info_dict['input_dim']:]
+    inverse_transform = lambda x : x*half_range[-info_dict['input_dim']:]/B + mean[-info_dict['input_dim']:]
     
     ## training set sample from the training library
-    reference_chain = training_set[compare_idx,:,-info_dict['input_dim']:].cpu().detach().numpy() * inverse_transform
+    reference_chain = inverse_transform(training_set[compare_idx,:,-info_dict['input_dim']:].cpu().detach().numpy())
 
     ## generate samples from the trained flow, conditioned on the astro parameter draw
-    flow_chain = gwb_flow_dist.condition(training_set[compare_idx,0,0:info_dict['context_dim']]).sample((int(1e6),)).cpu().detach().numpy() * inverse_transform
+    flow_chain = inverse_transform(gwb_flow_dist.condition(training_set[compare_idx,0,0:info_dict['context_dim']]).sample((int(1e6),)).cpu().detach().numpy())
 
     ## check plot directory
     plotdir = savedir+'/plots/'
@@ -207,8 +217,11 @@ def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_
                         contour_kwargs={'linewidths':2},  range = ranges, labels = labels,show_titles = True,
                 truth_color = 'white', desity = True, plot_datapoints = False)
     
-    # plt.legend(handles=lg_lines, bbox_to_anchor=(0., 1.5, 1., .0), loc=4)
-    plt.legend(bbox_to_anchor=(0., 1.5, 1., .0), loc=4)
+    ## make legend
+    handles = [Patch(edgecolor='mediumorchid', label='Conditional Marginal Flow', fill=False),Patch(edgecolor='teal', label='Training Set', fill=False)]
+    fig.legend(handles=handles,loc='upper right')
+
+    ## save
     for ext in ['.png','.pdf']:
         plt.savefig(plotdir+'/corner_training_reference'+ext)
     if show:
@@ -219,8 +232,13 @@ def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_
     ## Do the same exercise for the validation set
     
     ## validation set sample from the training library
-    validation_chain = validation_set[val_compare_idx,:,-info_dict['input_dim']:].cpu().detach().numpy() * inverse_transform
-    flow_chain_val = gwb_flow_dist.condition(validation_set[val_compare_idx,0,0:info_dict['context_dim']]).sample((int(1e6),)).cpu().detach().numpy() * inverse_transform
+    validation_chain = inverse_transform(validation_set[val_compare_idx,:,-info_dict['input_dim']:].cpu().detach().numpy())
+    flow_chain_val = inverse_transform(gwb_flow_dist.condition(validation_set[val_compare_idx,0,0:info_dict['context_dim']]).sample((int(1e6),)).cpu().detach().numpy())
+
+    q = .01
+    ll = np.quantile(flow_chain_val, q = q, axis = 0)
+    ul = np.quantile(flow_chain_val, q = 1-q, axis = 0)
+    ranges = list(zip(ll, ul))
     
     ## compare flow samples to the training dataset
     plt.figure()
@@ -232,8 +250,11 @@ def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_
                         contour_kwargs={'linewidths':2},  range = ranges, labels = labels,show_titles = True,
                 truth_color = 'white', desity = True, plot_datapoints = False)
     
-    # plt.legend(handles=lg_lines, bbox_to_anchor=(0., 1.5, 1., .0), loc=4)
-    plt.legend(bbox_to_anchor=(0., 1.5, 1., .0), loc=4)
+    ## make legend
+    handles = [Patch(edgecolor='mediumorchid', label='Conditional Marginal Flow', fill=False),Patch(edgecolor='teal', label='Validation Set', fill=False)]
+    fig.legend(handles=handles,loc='upper right')
+    
+    ## save
     for ext in ['.png','.pdf']:
         plt.savefig(plotdir+'/corner_validation_reference'+ext)
     if show:
@@ -243,7 +264,80 @@ def postprocess_plot_compare(savedir,training_data,compare_idx=None,val_compare_
     ## next steps -- add code to compare to the full, non-marginalized dataset
     ## and to compare to the equivalent dataset with the marginalized values fixed
     ## also fix the legends
+    print(info_dict.keys())
+    ## if doing either of the following comparisons, fully sample the marginal flow
+    if (holo_args is not None) or (comparison_holo_args is not None):
+        print("Sampling full marginal prior...")
+        fully_sampled_chain = torch.zeros_like(training_data)
+        fully_sampled_chain[..., 0:info_dict['context_dim']] = training_data[..., 0:info_dict['context_dim']]
+        for ct in tqdm(range(training_data.shape[0])):
+            fully_sampled_chain[ct, :, info_dict['context_dim']:] = gwb_flow_dist.condition(fully_sampled_chain[ct, 0, 0:info_dict['context_dim']]).sample((training_data.shape[1],))
+        fully_sampled_chain = inverse_transform(fully_sampled_chain.cpu().detach().numpy()[:,:,-info_dict['input_dim']:])
+        fully_sampled_chain = fully_sampled_chain.reshape(fully_sampled_chain.shape[0]*fully_sampled_chain.shape[1], info_dict['input_dim'])
+
+        q = .01
+        ll = np.quantile(fully_sampled_chain, q = q, axis = 0)
+        ul = np.quantile(fully_sampled_chain, q = 1-q, axis = 0)
+        ranges = list(zip(ll, ul))
+        
+        if holo_args is not None:
+            ## get the original, non-marginalized dataset
+            holo_draws, holo_spectra, holo_info = load_holodeck_population(**holo_args)
+
+            ## compare fully-sampled marginal distribution to original, non-marginalized dataset
+            plt.figure()
+            fig = None
+            fig = corner.corner(fully_sampled_chain,
+                                color='mediumorchid', fig = fig, bins=20, hist_bin_factor=2, data_kwargs={'ms':3}, hist_kwargs={'density': True, 'lw':2},
+                                contour_kwargs={'linewidths':2}, show_titles = True, desity = True, plot_datapoints = False, range = ranges, labels = labels)
+            
+            fig = corner.corner(np.log10(holo_spectra[:,:,-info_dict['input_dim']:].reshape(holo_spectra.shape[0]*holo_spectra.shape[1], info_dict['input_dim'])),
+                                fig = fig, color='teal', bins=20, hist_bin_factor=2, data_kwargs={'ms':3}, hist_kwargs={'density': True, 'lw':2}, 
+                                contour_kwargs={'linewidths':2},  range = ranges, labels = labels,show_titles = True,
+                                truth_color = 'white', desity = True, plot_datapoints = False)
+
+            ## make legend
+            handles = [Patch(edgecolor='mediumorchid', label='Marginal Flow Samples', fill=False),Patch(edgecolor='teal', label='Full Holodeck Dataset', fill=False)]
+            fig.legend(handles=handles,loc='upper right')
+
+            ## save
+            for ext in ['.png','.pdf']:
+                plt.savefig(plotdir+'/corner_nonmarginal_compare'+ext)
+            if show:
+                plt.show()
+            plt.close()
+        
+        
+        
     
+        ## compare fully-sampled marginal distribution to optional comparison dataset
+        ## created in the marginal space with some fixed values of the nuisance parameters
+        if comparison_holo_args is not None:
+            ## get the comparison dataset in the marginal space dataset
+            comparison_draws, comparison_spectra, comparison_info = load_holodeck_population(**compare_holo_args)
+
+            ## compare fully-sampled marginal distribution to original, non-marginalized dataset
+            plt.figure()
+            fig = None
+            fig = corner.corner(fully_sampled_chain,
+                                color='mediumorchid', fig = fig, bins=20, hist_bin_factor=2, data_kwargs={'ms':3}, hist_kwargs={'density': True, 'lw':2},
+                                contour_kwargs={'linewidths':2}, show_titles = True, desity = True, plot_datapoints = False, range = ranges, labels = labels)
+            
+            fig = corner.corner(np.log10(comparison_spectra[:,:,-info_dict['input_dim']:].reshape(comparison_spectra.shape[0]*comparison_spectra.shape[1], info_dict['input_dim'])),
+                                fig = fig, color='teal', bins=20, hist_bin_factor=2, data_kwargs={'ms':3}, hist_kwargs={'density': True, 'lw':2}, 
+                                contour_kwargs={'linewidths':2},  range = ranges, labels = labels,show_titles = True,
+                                truth_color = 'white', desity = True, plot_datapoints = False)
+
+            ## make legend
+            handles = [Patch(edgecolor='mediumorchid', label='Marginal Flow Samples'),Patch(edgecolor='teal', label='Comparison Holodeck Dataset')]
+            fig.legend(handles=handles,loc='upper right')
+
+            ## save
+            for ext in ['.png','.pdf']:
+                plt.savefig(plotdir+'/corner_nonmarginal_compare'+ext)
+            if show:
+                plt.show()
+            plt.close()
     
     return
 
@@ -530,12 +624,12 @@ if __name__=="__main__":
         os.mkdir(plotdir)
     flow_trainer.plot_loss(plotdir)
 
-
     ## postprocess
-    postprocess_plot_compare(savedir,training_data)
+    postprocess_plot_compare(savedir,training_data,holo_args={'popfile':args.holodeck_population,
+                                                              'N_gwb_bins':args.N_gwb_bins})
 
-
-
+    
+    
 
 
 
